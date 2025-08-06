@@ -6,6 +6,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.waypoints.Waypoint;
 import net.minecraft.world.waypoints.WaypointTransmitter;
+import com.leclowndu93150.better_locator_bar.network.ModdedPlayerTracker;
 
 import java.util.Optional;
 import java.util.UUID;
@@ -32,7 +33,6 @@ public class LodestoneWaypointTransmitter implements WaypointTransmitter {
 
     @Override
     public Optional<Connection> makeWaypointConnectionWith(ServerPlayer receiver) {
-        // Only create connection if the receiver is the owner of this waypoint
         if (receiver.getUUID().equals(ownerPlayerId)) {
             return Optional.of(new LodestoneConnection(receiver));
         }
@@ -61,7 +61,8 @@ public class LodestoneWaypointTransmitter implements WaypointTransmitter {
 
         @Override
         public void connect() {
-            this.receiver.connection.send(ClientboundTrackedWaypointPacket.addWaypointPosition(uuid, icon, pos));
+            Waypoint.Icon iconToSend = ModdedPlayerTracker.hasModInstalled(receiver) ? icon : new Waypoint.Icon();
+            this.receiver.connection.send(ClientboundTrackedWaypointPacket.addWaypointPosition(uuid, iconToSend, pos));
         }
 
         @Override
@@ -71,9 +72,8 @@ public class LodestoneWaypointTransmitter implements WaypointTransmitter {
 
         @Override
         public void update() {
-            // Don't send update packets - just send add packets to ensure the waypoint exists
-            // This prevents the NullPointerException when the client doesn't have the waypoint yet
-            this.receiver.connection.send(ClientboundTrackedWaypointPacket.addWaypointPosition(uuid, icon, pos));
+            Waypoint.Icon iconToSend = ModdedPlayerTracker.hasModInstalled(receiver) ? icon : new Waypoint.Icon();
+            this.receiver.connection.send(ClientboundTrackedWaypointPacket.addWaypointPosition(uuid, iconToSend, pos));
         }
 
         @Override
