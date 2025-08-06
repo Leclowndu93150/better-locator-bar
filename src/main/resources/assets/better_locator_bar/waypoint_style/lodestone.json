@@ -1,0 +1,10 @@
+{
+  "near_distance": 64,
+  "far_distance": 256,
+  "sprites": [
+    "better_locator_bar:lodestone_1",
+    "better_locator_bar:lodestone_2",
+    "better_locator_bar:lodestone_3",
+    "better_locator_bar:lodestone_4"
+  ]
+}
