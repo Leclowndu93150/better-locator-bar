@@ -9,7 +9,7 @@ import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 public class NetworkHandler {
     
     public static void register(final RegisterPayloadHandlersEvent event) {
-        final PayloadRegistrar registrar = event.registrar("1.0");
+        final PayloadRegistrar registrar = event.registrar("1.0").optional();
 
         registrar.playToServer(ModPresentPacket.TYPE, ModPresentPacket.STREAM_CODEC, NetworkHandler::handleModPresent);
     }
