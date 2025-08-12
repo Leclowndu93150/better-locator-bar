@@ -18,12 +18,10 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class LodestoneCompassTracker {
-    // Thread-safe storage for player waypoints and tick counters
     private static final Map<UUID, Map<GlobalPos, LodestoneWaypointTransmitter>> playerWaypoints = new ConcurrentHashMap<>();
     private static final Map<UUID, Integer> playerTickCounters = new ConcurrentHashMap<>();
-    
-    // Cache for tracking which compasses have already been cleaned
     private static final Map<UUID, Set<GlobalPos>> cleanedCompasses = new ConcurrentHashMap<>();
+    private static final Map<UUID, Integer> delayedProcessing = new ConcurrentHashMap<>();
 
     public void onPlayerTick(Player player) {
         if (!(player instanceof ServerPlayer serverPlayer)) return;
@@ -31,7 +29,16 @@ public class LodestoneCompassTracker {
         UUID playerId = serverPlayer.getUUID();
         int tickCounter = playerTickCounters.getOrDefault(playerId, 0);
         
-        // Check every 20 ticks (1 second)
+        if (delayedProcessing.containsKey(playerId)) {
+            int delayCounter = delayedProcessing.get(playerId);
+            if (++delayCounter >= 5) {
+                delayedProcessing.remove(playerId);
+                processPlayerCompasses(serverPlayer);
+            } else {
+                delayedProcessing.put(playerId, delayCounter);
+            }
+        }
+        
         if (++tickCounter >= 20) {
             playerTickCounters.put(playerId, 0);
             processPlayerCompasses(serverPlayer);
@@ -45,14 +52,64 @@ public class LodestoneCompassTracker {
         
         UUID playerId = serverPlayer.getUUID();
         
-        // Clear any cached cleaned compass data for this player
         cleanedCompasses.remove(playerId);
-        
-        // Immediately process compasses when player joins
-        processPlayerCompasses(serverPlayer);
-        
-        // Reset tick counter for this player
         playerTickCounters.put(playerId, 0);
+        updateAllCompassesOnJoin(serverPlayer);
+        delayedProcessing.put(playerId, 0);
+        processPlayerCompasses(serverPlayer);
+    }
+    
+    private void updateAllCompassesOnJoin(ServerPlayer player) {
+        boolean inventoryChanged = false;
+        
+        
+        ItemStack mainHand = player.getMainHandItem();
+        if (isLodestoneCompass(mainHand)) {
+            LodestoneTracker tracker = mainHand.get(DataComponents.LODESTONE_TRACKER);
+            if (tracker != null && tracker.target().isPresent()) {
+                GlobalPos targetPos = tracker.target().get();
+                boolean lodestoneExists = verifyLodestone(player.getServer(), targetPos);
+                ItemStack updated = mainHand.copy();
+                updateCompassLore(updated, targetPos, lodestoneExists, player);
+                player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, updated);
+                inventoryChanged = true;
+            }
+        }
+        
+        
+        ItemStack offHand = player.getOffhandItem();
+        if (isLodestoneCompass(offHand)) {
+            LodestoneTracker tracker = offHand.get(DataComponents.LODESTONE_TRACKER);
+            if (tracker != null && tracker.target().isPresent()) {
+                GlobalPos targetPos = tracker.target().get();
+                boolean lodestoneExists = verifyLodestone(player.getServer(), targetPos);
+                ItemStack updated = offHand.copy();
+                updateCompassLore(updated, targetPos, lodestoneExists, player);
+                player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.OFFHAND, updated);
+                inventoryChanged = true;
+            }
+        }
+        
+        
+        for (int i = 0; i < 36; i++) {
+            ItemStack stack = player.getInventory().getItem(i);
+            if (isLodestoneCompass(stack)) {
+                LodestoneTracker tracker = stack.get(DataComponents.LODESTONE_TRACKER);
+                if (tracker != null && tracker.target().isPresent()) {
+                    GlobalPos targetPos = tracker.target().get();
+                    boolean lodestoneExists = verifyLodestone(player.getServer(), targetPos);
+                    ItemStack updated = stack.copy();
+                    updateCompassLore(updated, targetPos, lodestoneExists, player);
+                    player.getInventory().setItem(i, updated);
+                    inventoryChanged = true;
+                }
+            }
+        }
+        
+        
+        if (inventoryChanged) {
+            player.inventoryMenu.sendAllDataToRemote();
+        }
     }
     
     public void onPlayerLeave(Player player) {
@@ -60,49 +117,61 @@ public class LodestoneCompassTracker {
         
         UUID playerId = serverPlayer.getUUID();
         
-        // Remove all waypoints for this player
         removeAllPlayerWaypoints(serverPlayer);
-        
-        // Clean up tracking data
         playerTickCounters.remove(playerId);
         cleanedCompasses.remove(playerId);
+        delayedProcessing.remove(playerId);
     }
 
     private void processPlayerCompasses(ServerPlayer player) {
         UUID playerId = player.getUUID();
         
-        // Get current compass positions from inventory
         Set<GlobalPos> currentCompassPositions = new HashSet<>();
-        List<ItemStack> compasses = findAllLodestoneCompasses(player);
         
-        // Process each compass
-        for (ItemStack compass : compasses) {
-            LodestoneTracker tracker = compass.get(DataComponents.LODESTONE_TRACKER);
-            if (tracker != null && tracker.target().isPresent()) {
-                GlobalPos targetPos = tracker.target().get();
-                
-                // Verify lodestone exists
-                if (verifyLodestone(player.getServer(), targetPos)) {
-                    // Lodestone exists - track it
-                    currentCompassPositions.add(targetPos);
-                    
-                    // Add coordinates to compass
-                    addCoordinatesToCompass(compass, targetPos.pos());
-                    
-                    // Clear from cleaned cache since it's valid again
-                    Set<GlobalPos> cleaned = cleanedCompasses.get(playerId);
-                    if (cleaned != null) {
-                        cleaned.remove(targetPos);
-                    }
-                } else {
-                    // Lodestone doesn't exist - clean up the compass
-                    cleanupCompass(compass, playerId, targetPos);
-                }
-            }
+        processCompassInSlot(player, -1, currentCompassPositions);
+        processCompassInSlot(player, -2, currentCompassPositions);
+        
+        for (int i = 0; i < 36; i++) {
+            processCompassInSlot(player, i, currentCompassPositions);
         }
         
-        // Update waypoints based on current compass positions
         updatePlayerWaypoints(player, currentCompassPositions);
+    }
+    
+    private void processCompassInSlot(ServerPlayer player, int slot, Set<GlobalPos> currentCompassPositions) {
+        ItemStack compass;
+        
+        if (slot == -1) {
+            compass = player.getMainHandItem();
+        } else if (slot == -2) {
+            compass = player.getOffhandItem();
+        } else {
+            compass = player.getInventory().getItem(slot);
+        }
+        
+        if (!isLodestoneCompass(compass)) return;
+        
+        LodestoneTracker tracker = compass.get(DataComponents.LODESTONE_TRACKER);
+        if (tracker != null && tracker.target().isPresent()) {
+            GlobalPos targetPos = tracker.target().get();
+            
+            boolean lodestoneExists = verifyLodestone(player.getServer(), targetPos);
+            
+            ItemStack updatedCompass = compass.copy();
+            updateCompassLore(updatedCompass, targetPos, lodestoneExists, player);
+            
+            if (slot == -1) {
+                player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, updatedCompass);
+            } else if (slot == -2) {
+                player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.OFFHAND, updatedCompass);
+            } else {
+                player.getInventory().setItem(slot, updatedCompass);
+            }
+            
+            if (lodestoneExists) {
+                currentCompassPositions.add(targetPos);
+            }
+        }
     }
 
     private boolean verifyLodestone(net.minecraft.server.MinecraftServer server, GlobalPos targetPos) {
@@ -112,32 +181,18 @@ public class LodestoneCompassTracker {
         return targetLevel.getBlockState(targetPos.pos()).is(Blocks.LODESTONE);
     }
 
-    private void cleanupCompass(ItemStack compass, UUID playerId, GlobalPos targetPos) {
-        // Check if we've already cleaned this compass for this player
-        Set<GlobalPos> cleaned = cleanedCompasses.computeIfAbsent(playerId, k -> new HashSet<>());
-        
-        if (!cleaned.contains(targetPos)) {
-            // First time cleaning this compass - remove data
-            compass.remove(DataComponents.LODESTONE_TRACKER);
-            removeLodestoneCoordinates(compass);
-            cleaned.add(targetPos);
-        }
-    }
 
     private void updatePlayerWaypoints(ServerPlayer player, Set<GlobalPos> currentPositions) {
         UUID playerId = player.getUUID();
         Map<GlobalPos, LodestoneWaypointTransmitter> existingWaypoints = playerWaypoints.computeIfAbsent(playerId, k -> new ConcurrentHashMap<>());
         Map<GlobalPos, LodestoneWaypointTransmitter> newWaypoints = new HashMap<>();
         
-        // Add or keep waypoints for current compass positions
         for (GlobalPos pos : currentPositions) {
             LodestoneWaypointTransmitter waypoint = existingWaypoints.get(pos);
             
             if (waypoint != null) {
-                // Reuse existing waypoint
                 newWaypoints.put(pos, waypoint);
             } else {
-                // Create new waypoint
                 waypoint = createWaypoint(player, pos);
                 if (waypoint != null) {
                     newWaypoints.put(pos, waypoint);
@@ -145,14 +200,12 @@ public class LodestoneCompassTracker {
             }
         }
         
-        // Remove waypoints that are no longer needed
         for (Map.Entry<GlobalPos, LodestoneWaypointTransmitter> entry : existingWaypoints.entrySet()) {
             if (!newWaypoints.containsKey(entry.getKey())) {
                 removeWaypoint(player.level(), entry.getValue());
             }
         }
         
-        // Update the stored waypoints
         if (newWaypoints.isEmpty()) {
             playerWaypoints.remove(playerId);
         } else {
@@ -162,11 +215,10 @@ public class LodestoneCompassTracker {
 
     private LodestoneWaypointTransmitter createWaypoint(ServerPlayer player, GlobalPos targetPos) {
         try {
-            // Find the compass for this position to get its icon
             ItemStack compass = findCompassForPosition(player, targetPos);
             if (compass == null) return null;
             
-            Waypoint.Icon icon = createCompassIcon(compass);
+            Waypoint.Icon icon = createCompassIcon(compass, targetPos, player);
             UUID waypointId = UUID.nameUUIDFromBytes((LodestoneWaypointStyles.LODESTONE_UUID_PREFIX + player.getUUID() + "_" + targetPos.toString()).getBytes());
             
             LodestoneWaypointTransmitter waypoint = new LodestoneWaypointTransmitter(
@@ -178,7 +230,6 @@ public class LodestoneCompassTracker {
             
             return waypoint;
         } catch (Exception e) {
-            // Failed to create waypoint
             return null;
         }
     }
@@ -187,7 +238,6 @@ public class LodestoneCompassTracker {
         try {
             level.getWaypointManager().untrackWaypoint(waypoint);
         } catch (Exception ignored) {
-            // Silently handle errors
         }
     }
 
@@ -219,19 +269,18 @@ public class LodestoneCompassTracker {
     private List<ItemStack> findAllLodestoneCompasses(ServerPlayer player) {
         List<ItemStack> compasses = new ArrayList<>();
         
-        // Check main hand
+        
         ItemStack mainHand = player.getMainHandItem();
         if (isLodestoneCompass(mainHand)) {
             compasses.add(mainHand);
         }
         
-        // Check off hand
+        
         ItemStack offHand = player.getOffhandItem();
         if (isLodestoneCompass(offHand) && !compasses.contains(offHand)) {
             compasses.add(offHand);
         }
-        
-        // Check inventory slots (0-35: hotbar and main inventory)
+
         for (int i = 0; i < 36; i++) {
             ItemStack stack = player.getInventory().getItem(i);
             if (isLodestoneCompass(stack) && !compasses.contains(stack)) {
@@ -246,11 +295,11 @@ public class LodestoneCompassTracker {
         return stack.is(Items.COMPASS) && stack.has(DataComponents.LODESTONE_TRACKER);
     }
 
-    private Waypoint.Icon createCompassIcon(ItemStack compass) {
+    private Waypoint.Icon createCompassIcon(ItemStack compass, GlobalPos targetPos, ServerPlayer player) {
         Waypoint.Icon icon = new Waypoint.Icon();
         icon.style = LodestoneWaypointStyles.LODESTONE;
 
-        // Check for TCC dyed compass colors
+        // PRIORITY 1: Check for TCC dyed compass colors first
         if (compass.has(DataComponents.ITEM_MODEL)) {
             String itemModel = compass.get(DataComponents.ITEM_MODEL).toString();
             if (itemModel.contains("tcc:dyed_compass/")) {
@@ -258,8 +307,20 @@ public class LodestoneCompassTracker {
                 Optional<Integer> color = getTCCCompassColor(colorName);
                 if (color.isPresent()) {
                     icon.color = color;
+                    return icon; // TCC color takes priority, return immediately
                 }
             }
+        }
+
+        // PRIORITY 2: Use shared lodestone color if no TCC color
+        try {
+            LodestoneColorRegistry registry = LodestoneColorRegistry.get(player.getServer());
+            Integer lodestoneColor = registry.getLodestoneColor(targetPos);
+            if (lodestoneColor != null) {
+                icon.color = Optional.of(lodestoneColor);
+            }
+        } catch (Exception e) {
+            // Fallback if registry access fails - use default color
         }
 
         return icon;
@@ -287,8 +348,9 @@ public class LodestoneCompassTracker {
         };
     }
 
-    private void addCoordinatesToCompass(ItemStack compass, BlockPos pos) {
+    private void updateCompassLore(ItemStack compass, GlobalPos targetPos, boolean lodestoneExists, ServerPlayer player) {
         List<Component> loreList = new ArrayList<>();
+        BlockPos pos = targetPos.pos();
 
         // Get existing lore if present
         if (compass.has(DataComponents.LORE)) {
@@ -296,34 +358,146 @@ public class LodestoneCompassTracker {
             loreList.addAll(existingLore.lines());
         }
 
-        // Create coordinate component
-        Component coordComponent = Component.literal("Lodestone: " + pos.getX() + ", " + pos.getY() + ", " + pos.getZ())
-                .withStyle(style -> style.withColor(0x55FFFF));
-
         // Remove any existing lodestone coordinate lines
-        loreList.removeIf(line -> line.getString().startsWith("Lodestone: "));
+        loreList.removeIf(line -> {
+            String lineText = line.getString();
+            return lineText.startsWith("Lodestone: ") || lineText.startsWith("● ") || 
+                   lineText.matches("^-?\\d+, -?\\d+, -?\\d+$"); // Also remove plain coordinates
+        });
         
-        // Add new coordinate line
+        Component coordComponent;
+        if (lodestoneExists) {
+            // Lodestone exists - show colored circle with coordinates
+            int circleColor = getCompassColor(compass, targetPos, player);
+            
+            coordComponent = Component.literal("")
+                    .append(Component.literal("● ").withStyle(style -> style.withColor(circleColor).withItalic(false)))
+                    .append(Component.literal(pos.getX() + ", " + pos.getY() + ", " + pos.getZ())
+                            .withStyle(style -> style.withColor(0x999999).withItalic(false)));
+        } else {
+            // Lodestone broken - show dark gray circle and coordinates
+            coordComponent = Component.literal("")
+                    .append(Component.literal("● ").withStyle(style -> style.withColor(0x555555).withItalic(false)))
+                    .append(Component.literal(pos.getX() + ", " + pos.getY() + ", " + pos.getZ())
+                            .withStyle(style -> style.withColor(0x555555).withItalic(false)));
+        }
+        
+        // Add the coordinate line
         loreList.add(coordComponent);
 
         // Update compass lore
         compass.set(DataComponents.LORE, new ItemLore(loreList));
     }
+    
+    private int getCompassColor(ItemStack compass, GlobalPos targetPos, ServerPlayer player) {
+        // Check for TCC dyed compass colors first
+        if (compass.has(DataComponents.ITEM_MODEL)) {
+            String itemModel = compass.get(DataComponents.ITEM_MODEL).toString();
+            if (itemModel.contains("tcc:dyed_compass/")) {
+                String colorName = itemModel.substring(itemModel.lastIndexOf("/") + 1);
+                Optional<Integer> color = getTCCCompassColor(colorName);
+                if (color.isPresent()) {
+                    return color.get();
+                }
+            }
+        }
 
-    private void removeLodestoneCoordinates(ItemStack compass) {
-        if (compass.has(DataComponents.LORE)) {
-            ItemLore existingLore = compass.get(DataComponents.LORE);
-            List<Component> loreList = new ArrayList<>(existingLore.lines());
+        // Use shared lodestone color if no TCC color
+        try {
+            LodestoneColorRegistry registry = LodestoneColorRegistry.get(player.getServer());
+            Integer lodestoneColor = registry.getLodestoneColor(targetPos);
+            if (lodestoneColor != null) {
+                return lodestoneColor;
+            }
+        } catch (Exception e) {
+            // Fallback if registry access fails
+        }
+
+        // Default color
+        return 0x55FFFF;
+    }
+    
+    /**
+     * Immediately updates all compasses pointing to a broken lodestone.
+     * Called when a lodestone block is broken.
+     */
+    public void updateCompassesForBrokenLodestone(GlobalPos brokenPos, net.minecraft.server.MinecraftServer server) {
+        // Loop through all online players
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            boolean inventoryChanged = false;
             
-            // Remove any lodestone coordinate lines
-            loreList.removeIf(line -> line.getString().startsWith("Lodestone: "));
             
-            if (loreList.isEmpty()) {
-                // Remove lore component entirely if no lore remains
-                compass.remove(DataComponents.LORE);
-            } else {
-                compass.set(DataComponents.LORE, new ItemLore(loreList));
+            ItemStack mainHand = player.getMainHandItem();
+            if (isCompassPointingTo(mainHand, brokenPos)) {
+                ItemStack updated = mainHand.copy();
+                updateCompassLore(updated, brokenPos, false, player);
+                player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, updated);
+                inventoryChanged = true;
+            }
+            
+            
+            ItemStack offHand = player.getOffhandItem();
+            if (isCompassPointingTo(offHand, brokenPos)) {
+                ItemStack updated = offHand.copy();
+                updateCompassLore(updated, brokenPos, false, player);
+                player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.OFFHAND, updated);
+                inventoryChanged = true;
+            }
+            
+            
+            for (int i = 0; i < 36; i++) {
+                ItemStack stack = player.getInventory().getItem(i);
+                if (isCompassPointingTo(stack, brokenPos)) {
+                    ItemStack updated = stack.copy();
+                    updateCompassLore(updated, brokenPos, false, player);
+                    player.getInventory().setItem(i, updated);
+                    inventoryChanged = true;
+                }
+            }
+            
+            
+            if (inventoryChanged) {
+                player.inventoryMenu.sendAllDataToRemote();
             }
         }
     }
+    
+    private boolean isCompassPointingTo(ItemStack stack, GlobalPos targetPos) {
+        if (!isLodestoneCompass(stack)) return false;
+        
+        LodestoneTracker tracker = stack.get(DataComponents.LODESTONE_TRACKER);
+        if (tracker != null && tracker.target().isPresent()) {
+            return tracker.target().get().equals(targetPos);
+        }
+        return false;
+    }
+    
+    /**
+     * Refreshes waypoints for all players when a lodestone is placed or broken.
+     * This ensures color changes are immediately visible to all players.
+     */
+    public void refreshWaypointsForLodestone(GlobalPos lodestonePos, net.minecraft.server.MinecraftServer server) {
+        // Find all players that might be tracking this lodestone and refresh their waypoints
+        for (UUID playerId : playerWaypoints.keySet()) {
+            Map<GlobalPos, LodestoneWaypointTransmitter> waypoints = playerWaypoints.get(playerId);
+            if (waypoints != null && waypoints.containsKey(lodestonePos)) {
+                // Find the player and refresh their waypoint immediately
+                ServerPlayer player = server.getPlayerList().getPlayer(playerId);
+                if (player != null) {
+                    // Remove the old waypoint
+                    LodestoneWaypointTransmitter oldWaypoint = waypoints.get(lodestonePos);
+                    if (oldWaypoint != null) {
+                        removeWaypoint(player.level(), oldWaypoint);
+                    }
+                    
+                    // Create a new waypoint with updated color
+                    LodestoneWaypointTransmitter newWaypoint = createWaypoint(player, lodestonePos);
+                    if (newWaypoint != null) {
+                        waypoints.put(lodestonePos, newWaypoint);
+                    }
+                }
+            }
+        }
+    }
+    
 }
